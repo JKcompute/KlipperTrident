@@ -1,0 +1,10 @@
+# exclude everything except directory config. 
+# later i might add slicer profiles
+/*
+# !/backup
+!/config
+!/input_shaper_data
+!/scripts
+!/documents
+!/images
+!README.md
