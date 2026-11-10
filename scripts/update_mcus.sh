@@ -1,9 +1,14 @@
 #!/bin/bash
-# Rebuild and reflash all 3 Trident MCUs (Leviathan, Nitehawk-SB, Therm2)
-# against whatever Kalico source is currently checked out at ~/klipper.
+# Rebuild and reflash all 3 Trident Kalico MCUs (Leviathan, Nitehawk-SB,
+# Therm2) against whatever Kalico source is currently checked out at
+# ~/klipper, then update the Nevermore controller firmware to the release
+# matching the installed nevermore Klipper module (~/nevermore-controller).
 #
-# Run this AFTER updating Kalico itself (e.g. via Mainsail's update_manager
-# or `git -C ~/klipper pull`), never before.
+# Run this AFTER updating Kalico / nevermore via Mainsail's update_manager
+# (or `git -C ~/klipper pull`), never before.
+#
+# The Nevermore is NOT Kalico firmware - it is flashed over USB with the
+# project's own OTA tool. Skip it with: SKIP_NEVERMORE=1 update_mcus.sh
 #
 # Therm2 has no working software DFU trigger, so this script will pause
 # and wait for you to physically enter DFU mode on it (hold BOOT while
@@ -87,7 +92,41 @@ LOG "Flashing Nitehawk-SB ($KAT_DEV)"
 eval $KATAPULT -d "/dev/serial/by-id/$KAT_DEV" -f "$KLIPPER/out/klipper.bin" || FAIL "flash failed on Nitehawk-SB"
 
 ######################################################################
-# 3. Therm2 expander - USB, STM32 DFU (no software trigger available)
+# 3. Nevermore controller (Waveshare RP2040 Touch LCD) - USB, OTA tool
+#    Done before Therm2 so every automatic step runs before the manual one.
+#    Non-fatal: if it fails the old firmware is still on the board.
+######################################################################
+NEVERMORE_REPO="$HOME/nevermore-controller"
+NEVERMORE_RESULT="skipped"
+if [ "${SKIP_NEVERMORE:-0}" = "1" ]; then
+    LOG "Skipping Nevermore (SKIP_NEVERMORE=1)"
+elif [ ! -x "$NEVERMORE_REPO/tools/update_ota.py" ]; then
+    echo "WARNING: $NEVERMORE_REPO/tools/update_ota.py not found - skipping Nevermore" >&2
+else
+    NM_DEV=$(ls /dev/serial/by-id/ 2>/dev/null | grep "^usb-Nevermore_Filter_.*-if02$" | head -1)
+    # flash the release the installed klipper module was cut from, so they match
+    NM_TAG=$(git -C "$NEVERMORE_REPO" describe --tags --abbrev=0 --match "v*" 2>/dev/null)
+    if [ -z "$NM_DEV" ]; then
+        echo "WARNING: Nevermore not found (no usb-Nevermore_Filter_*-if02) - skipping" >&2
+        NEVERMORE_RESULT="NOT FOUND"
+    elif [ -z "$NM_TAG" ]; then
+        echo "WARNING: could not determine nevermore release tag - skipping" >&2
+        NEVERMORE_RESULT="NO TAG"
+    else
+        LOG "Updating Nevermore ($NM_DEV) to release $NM_TAG"
+        # klipper is already stopped above, so --ignore-klipper is safe
+        if "$NEVERMORE_REPO/tools/update_ota.py" --serial "/dev/serial/by-id/$NM_DEV" \
+                --tag "$NM_TAG" --unattended --ignore-klipper; then
+            NEVERMORE_RESULT="ok ($NM_TAG)"
+        else
+            echo "WARNING: Nevermore update failed - continuing (old firmware still installed)" >&2
+            NEVERMORE_RESULT="FAILED"
+        fi
+    fi
+fi
+
+######################################################################
+# 4. Therm2 expander - USB, STM32 DFU (no software trigger available)
 ######################################################################
 LOG "Building Therm2 firmware (trimmed - thermistor-only board, small 32KB flash)"
 build_firmware <<'EOF'
@@ -150,6 +189,10 @@ sleep 8
 
 LOG "Final MCU firmware versions:"
 grep "Loaded MCU " ~/printer_data/logs/klippy.log | tail -4
+echo "Nevermore update: $NEVERMORE_RESULT"
+NM_CONN=$(curl -s "http://localhost:7125/printer/objects/query?nevermore=connected" \
+  | python3 -c "import sys,json;print(json.load(sys.stdin)['result']['status']['nevermore']['connected'])" 2>/dev/null)
+echo "Nevermore connected to klipper: ${NM_CONN:-unknown}"
 
 PSTATE=$(curl -s http://localhost:7125/printer/info | python3 -c "import sys,json;print(json.load(sys.stdin)['result']['state'])" 2>/dev/null)
 echo
@@ -157,4 +200,4 @@ echo "Printer state: $PSTATE"
 if [ "$PSTATE" != "ready" ]; then
     FAIL "printer did not come back ready - check ~/printer_data/logs/klippy.log"
 fi
-LOG "All 3 MCUs updated successfully."
+LOG "All 3 Kalico MCUs updated successfully. Nevermore: $NEVERMORE_RESULT"
